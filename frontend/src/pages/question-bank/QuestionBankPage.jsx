@@ -1,0 +1,1380 @@
+import { Link, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import AppShell from "../../components/AppShell";
+import ConfirmDialog from "../../components/ConfirmDialog";
+import { useCurrentUser } from "../../hooks/useCurrentUser";
+import { listMyOfferings } from "../../lib/academicApi";
+import {
+  createQuestionBankQuestion,
+  deleteQuestionBankQuestion,
+  listQuestionBankQuestions,
+} from "../../lib/questionBankApi";
+
+const questionTypes = [
+  { value: "MCQ", label: "MCQ", help: "Single correct option" },
+  { value: "Text", label: "Text answer", help: "Model answer required" },
+  { value: "CSharp", label: "C#", help: "Prompt and starter code" },
+  { value: "SQL", label: "SQL", help: "Schema and expected query result" },
+];
+
+const starterTemplates = {
+  CSharp: `using System;
+
+public class Solution
+{
+    public static void Main()
+    {
+        // Write your solution here
+    }
+}`,
+  SQL: `SELECT
+    *
+FROM
+    table_name;`,
+};
+
+const initialQuestionForm = {
+  type: "MCQ",
+  text: "",
+  points: 10,
+  topic: "",
+  difficulty: "Medium",
+  correctAnswer: "",
+  correctAnswers: [],
+  options: ["", "", "", ""],
+  starterCode: starterTemplates.CSharp,
+  sqlSchema: "",
+  sqlDialect: "PostgreSQL",
+  datasetDescription: "",
+  expectedOutput: "",
+  modelAnswer: "",
+  gradingNotes: "",
+  requiredMethodSignature: "",
+  expectedBehavior: "",
+  allowedLibraries: "",
+  timeoutNote: "",
+  memoryNote: "",
+  publicTestCasesText: "",
+  hiddenTestCasesText: "",
+  expectedAnswer: "",
+};
+
+export default function QuestionBankPage() {
+  const { t } = useTranslation();
+  const { user, loading: userLoading, error: userError } = useCurrentUser();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [offerings, setOfferings] = useState([]);
+  const [questions, setQuestions] = useState([]);
+  const [offeringsLoading, setOfferingsLoading] = useState(true);
+  const [questionsLoading, setQuestionsLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [filters, setFilters] = useState({
+    type: "",
+    search: "",
+    topic: "",
+  });
+  const [questionPage, setQuestionPage] = useState(1);
+  const [questionPageSize, setQuestionPageSize] = useState(10);
+  const [authoringOpen, setAuthoringOpen] = useState(false);
+  const [questionForm, setQuestionForm] = useState(initialQuestionForm);
+  const [formErrors, setFormErrors] = useState({});
+  const [savingQuestion, setSavingQuestion] = useState(false);
+  const [pendingDeleteQuestion, setPendingDeleteQuestion] = useState(null);
+
+  const selectedOfferingId = searchParams.get("offeringId") || "";
+
+  useEffect(() => {
+    let active = true;
+
+    (async () => {
+      try {
+        setOfferingsLoading(true);
+        setError("");
+        const data = await listMyOfferings();
+        if (!active) return;
+        const nextOfferings = Array.isArray(data) ? data : [];
+        setOfferings(nextOfferings);
+
+        if (!selectedOfferingId && nextOfferings[0]?.id) {
+          setSearchParams({ offeringId: nextOfferings[0].id }, { replace: true });
+        }
+      } catch {
+        if (active) setError(t("questionBank.loadOfferingsError"));
+      } finally {
+        if (active) setOfferingsLoading(false);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedOfferingId, setSearchParams, t]);
+
+  useEffect(() => {
+    loadQuestions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters, selectedOfferingId, t]);
+
+  const selectedOffering = useMemo(
+    () => offerings.find((offering) => offering.id === selectedOfferingId) || null,
+    [offerings, selectedOfferingId],
+  );
+
+  const filteredQuestions = useMemo(() => {
+    const topic = filters.topic.trim().toLowerCase();
+    if (!topic) return questions;
+    return questions.filter((question) => String(question.topic || "").toLowerCase().includes(topic));
+  }, [filters.topic, questions]);
+
+  const questionStats = useMemo(() => {
+    const stats = {
+      total: filteredQuestions.length,
+      mcq: 0,
+      text: 0,
+      technical: 0,
+      points: 0,
+    };
+
+    for (const question of filteredQuestions) {
+      if (question.type === "MCQ") stats.mcq += 1;
+      else if (question.type === "Text") stats.text += 1;
+      else stats.technical += 1;
+      stats.points += Number(question.points || 0);
+    }
+
+    return stats;
+  }, [filteredQuestions]);
+
+  const questionPageCount = Math.max(1, Math.ceil(filteredQuestions.length / questionPageSize));
+  const visibleQuestions = useMemo(() => {
+    const startIndex = (questionPage - 1) * questionPageSize;
+    return filteredQuestions.slice(startIndex, startIndex + questionPageSize);
+  }, [questionPage, questionPageSize, filteredQuestions]);
+  const questionStart = filteredQuestions.length === 0 ? 0 : (questionPage - 1) * questionPageSize + 1;
+  const questionEnd = Math.min(filteredQuestions.length, questionPage * questionPageSize);
+
+  useEffect(() => {
+    setQuestionPage(1);
+  }, [filters.type, filters.search, filters.topic, selectedOfferingId, questionPageSize]);
+
+  useEffect(() => {
+    setQuestionPage((current) => Math.min(current, questionPageCount));
+  }, [questionPageCount]);
+
+  async function loadQuestions() {
+    if (!selectedOfferingId) {
+      setQuestions([]);
+      return;
+    }
+
+    try {
+      setQuestionsLoading(true);
+      setError("");
+      const apiFilters = {
+        type: filters.type,
+        search: filters.search,
+      };
+      const data = await listQuestionBankQuestions(selectedOfferingId, apiFilters);
+      setQuestions(Array.isArray(data) ? data : []);
+    } catch {
+      setError(t("questionBank.loadQuestionsError"));
+    } finally {
+      setQuestionsLoading(false);
+    }
+  }
+
+  function openAuthoringPanel(nextType = "MCQ") {
+    setAuthoringOpen(true);
+    setSuccess("");
+    setError("");
+    setFormErrors({});
+    setQuestionForm({
+      ...initialQuestionForm,
+      type: nextType,
+      starterCode: starterTemplates[nextType] || initialQuestionForm.starterCode,
+    });
+  }
+
+  function onTypeChange(nextType) {
+    setFormErrors({});
+    setQuestionForm((current) => ({
+      ...current,
+      type: nextType,
+      correctAnswer: nextType === "MCQ" || nextType === "Text" ? current.correctAnswer : "",
+      starterCode: isTechnicalType(nextType) ? current.starterCode || starterTemplates[nextType] || "" : current.starterCode,
+      sqlSchema: nextType === "SQL" ? current.sqlSchema : "",
+      sqlDialect: nextType === "SQL" ? current.sqlDialect || "PostgreSQL" : current.sqlDialect,
+      datasetDescription: nextType === "SQL" ? current.datasetDescription : "",
+      expectedOutput: nextType === "SQL" || nextType === "CSharp" ? current.expectedOutput : "",
+      modelAnswer: nextType === "SQL" || nextType === "CSharp" ? current.modelAnswer : "",
+      gradingNotes: nextType === "SQL" || nextType === "CSharp" ? current.gradingNotes : "",
+      requiredMethodSignature: nextType === "CSharp" ? current.requiredMethodSignature : "",
+      expectedBehavior: nextType === "CSharp" ? current.expectedBehavior : "",
+      allowedLibraries: nextType === "CSharp" ? current.allowedLibraries : "",
+      timeoutNote: nextType === "CSharp" ? current.timeoutNote : "",
+      memoryNote: nextType === "CSharp" ? current.memoryNote : "",
+      publicTestCasesText: nextType === "SQL" || nextType === "CSharp" ? current.publicTestCasesText : "",
+      hiddenTestCasesText: nextType === "SQL" || nextType === "CSharp" ? current.hiddenTestCasesText : "",
+      expectedAnswer: isTechnicalType(nextType) ? current.expectedAnswer : "",
+    }));
+  }
+
+  function updateOption(index, value) {
+    setQuestionForm((current) => ({
+      ...current,
+      options: current.options.map((option, optionIndex) => (optionIndex === index ? value : option)),
+    }));
+  }
+
+  function addOption() {
+    setQuestionForm((current) => ({ ...current, options: [...current.options, ""] }));
+  }
+
+  function removeOption(index) {
+    setQuestionForm((current) => ({
+      ...current,
+      options: current.options.filter((_, optionIndex) => optionIndex !== index),
+    }));
+  }
+
+  async function saveQuestion({ keepAuthoringOpen = true } = {}) {
+    if (!selectedOfferingId) return;
+
+    const nextErrors = validateQuestionForm(questionForm);
+    setFormErrors(nextErrors);
+    setSuccess("");
+
+    if (Object.keys(nextErrors).length > 0) {
+      return;
+    }
+
+    try {
+      setSavingQuestion(true);
+      setError("");
+
+      const normalizedOptions = questionForm.options.map((option) => option.trim()).filter(Boolean);
+      const payload = {
+        text: buildQuestionText(questionForm),
+        type: questionForm.type,
+        points: Number(questionForm.points) || 0,
+        topic: questionForm.topic.trim(),
+        difficulty: questionForm.difficulty,
+        correctAnswer: questionForm.type === "SQL" || questionForm.type === "CSharp"
+          ? questionForm.modelAnswer.trim()
+          : isTechnicalType(questionForm.type)
+            ? questionForm.expectedAnswer.trim()
+          : questionForm.type === "MCQ"
+            ? serializeCorrectAnswers(questionForm.correctAnswers)
+            : questionForm.correctAnswer.trim(),
+        options: questionForm.type === "MCQ" ? normalizedOptions : [],
+        technicalMetadata: buildTechnicalMetadata(questionForm),
+      };
+
+      await createQuestionBankQuestion(selectedOfferingId, payload);
+      await loadQuestions();
+      setSuccess("Question saved in the selected offering.");
+      setFormErrors({});
+
+      if (keepAuthoringOpen) {
+        setQuestionForm((current) => ({
+          ...initialQuestionForm,
+          type: current.type,
+          starterCode: starterTemplates[current.type] || initialQuestionForm.starterCode,
+          sqlDialect: current.type === "SQL" ? current.sqlDialect : initialQuestionForm.sqlDialect,
+        }));
+      } else {
+        setAuthoringOpen(false);
+        setQuestionForm(initialQuestionForm);
+      }
+    } catch (err) {
+      setError(readApiMessage(err) || "Question could not be saved.");
+    } finally {
+      setSavingQuestion(false);
+    }
+  }
+
+  async function handleDelete(questionId) {
+    const question = questions.find((item) => item.id === questionId);
+    setPendingDeleteQuestion(question || { id: questionId });
+  }
+
+  async function confirmDeleteQuestion() {
+    if (!pendingDeleteQuestion?.id) return;
+
+    try {
+      setError("");
+      setSuccess("");
+      await deleteQuestionBankQuestion(pendingDeleteQuestion.id);
+      setQuestions((current) => current.filter((item) => item.id !== pendingDeleteQuestion.id));
+      setPendingDeleteQuestion(null);
+    } catch {
+      setError(t("questionBank.deleteError"));
+    }
+  }
+
+  if (userLoading) {
+    return <div className="pageState">{t("questionBank.loading")}</div>;
+  }
+
+  if (!user) {
+    return <div className="pageState">{userError || t("questionBank.userError")}</div>;
+  }
+
+  return (
+    <AppShell
+      user={user}
+      badge={t("questionBank.badge")}
+      title="Question bank"
+      subtitle="Manage reusable assessment questions by course offering without leaving the academic context."
+    >
+      <div className="stackXl questionBankWorkspace">
+        {error ? <div className="alert">{error}</div> : null}
+        {success ? <div className="successBanner">{success}</div> : null}
+        {pendingDeleteQuestion ? (
+          <ConfirmDialog
+            title="Delete question from bank?"
+            tone="danger"
+            confirmLabel="Delete question"
+            onCancel={() => setPendingDeleteQuestion(null)}
+            onConfirm={confirmDeleteQuestion}
+          >
+            <p>{t("questionBank.deleteConfirm")}</p>
+            {pendingDeleteQuestion.text ? (
+              <div className="confirmationSubject">
+                <strong>{pendingDeleteQuestion.type || "Question"}</strong>
+                <span>{pendingDeleteQuestion.text}</span>
+              </div>
+            ) : null}
+          </ConfirmDialog>
+        ) : null}
+
+        <section className="surfaceCard listControlPanel">
+          <div className="sectionHeader">
+            <div>
+              <h3>Question bank workspace</h3>
+              <span className="sectionMeta">
+                Select an offering, filter the bank, and add questions in place.
+              </span>
+            </div>
+            <div className="resourceActionGroup">
+              <button className="btn btnPrimary" type="button" onClick={() => openAuthoringPanel()} disabled={!selectedOfferingId}>
+                Add question
+              </button>
+            </div>
+          </div>
+          <div className="sectionBody stackLg">
+            <div className="filtersRow questionBankFilters">
+              <div className="field questionBankFieldWide">
+                <label className="label">{t("questionBank.offering")}</label>
+                <select
+                  className="input"
+                  value={selectedOfferingId}
+                  onChange={(e) => setSearchParams(e.target.value ? { offeringId: e.target.value } : {}, { replace: true })}
+                  disabled={offeringsLoading}
+                >
+                  <option value="">{t("questionBank.selectOffering")}</option>
+                  {offerings.map((offering) => (
+                    <option key={offering.id} value={offering.id}>
+                      {formatOffering(offering)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field">
+                <label className="label">{t("questionBank.type")}</label>
+                <select
+                  className="input"
+                  value={filters.type}
+                  onChange={(e) => setFilters((current) => ({ ...current, type: e.target.value }))}
+                  disabled={!selectedOfferingId}
+                >
+                  <option value="">{t("questionBank.allTypes")}</option>
+                  {questionTypes.map((type) => (
+                    <option key={type.value} value={type.value}>
+                      {type.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field">
+                <label className="label">Topic</label>
+                <input
+                  className="input"
+                  value={filters.topic}
+                  onChange={(e) => setFilters((current) => ({ ...current, topic: e.target.value }))}
+                  placeholder="Module, chapter, topic"
+                  disabled={!selectedOfferingId}
+                />
+              </div>
+
+              <div className="field">
+                <label className="label">{t("questionBank.search")}</label>
+                <input
+                  className="input"
+                  value={filters.search}
+                  onChange={(e) => setFilters((current) => ({ ...current, search: e.target.value }))}
+                  placeholder={t("questionBank.searchPlaceholder")}
+                  disabled={!selectedOfferingId}
+                />
+              </div>
+
+              <div className="field">
+                <label className="label">Rows</label>
+                <select className="input" value={questionPageSize} onChange={(e) => setQuestionPageSize(Number(e.target.value))} disabled={!selectedOfferingId}>
+                  <option value={10}>10 rows</option>
+                  <option value={25}>25 rows</option>
+                  <option value={50}>50 rows</option>
+                </select>
+              </div>
+            </div>
+
+            {selectedOffering ? (
+              <div className="questionBankContextRow">
+                <span>{formatOffering(selectedOffering)}</span>
+                <span>Showing {questionStart}-{questionEnd} of {filteredQuestions.length}</span>
+              </div>
+            ) : null}
+          </div>
+        </section>
+
+        {selectedOfferingId && authoringOpen ? (
+          <QuestionAuthoringPanel
+            form={questionForm}
+            errors={formErrors}
+            saving={savingQuestion}
+            success={success}
+            selectedOffering={selectedOffering}
+            onClose={() => {
+              setAuthoringOpen(false);
+              setFormErrors({});
+            }}
+            onChange={(nextForm) => setQuestionForm(nextForm)}
+            onTypeChange={onTypeChange}
+            onUpdateOption={updateOption}
+            onAddOption={addOption}
+            onRemoveOption={removeOption}
+            onSaveAnother={() => saveQuestion({ keepAuthoringOpen: true })}
+            onSaveClose={() => saveQuestion({ keepAuthoringOpen: false })}
+          />
+        ) : null}
+
+        <section className="questionBankSummaryGrid" aria-label="Question bank summary">
+          <article className="summaryCard">
+            <span className="summaryLabel">Questions</span>
+            <strong>{questionStats.total}</strong>
+          </article>
+          <article className="summaryCard">
+            <span className="summaryLabel">MCQ</span>
+            <strong>{questionStats.mcq}</strong>
+          </article>
+          <article className="summaryCard">
+            <span className="summaryLabel">Text</span>
+            <strong>{questionStats.text}</strong>
+          </article>
+          <article className="summaryCard">
+            <span className="summaryLabel">Code / SQL</span>
+            <strong>{questionStats.technical}</strong>
+          </article>
+          <article className="summaryCard">
+            <span className="summaryLabel">Total points</span>
+            <strong>{questionStats.points}</strong>
+          </article>
+        </section>
+
+        {offeringsLoading ? (
+          <div className="pageStateCard">{t("questionBank.loadingOfferings")}</div>
+        ) : !selectedOfferingId ? (
+          <div className="emptyState">
+            <p>{t("questionBank.emptyOfferingTitle")}</p>
+            <p>{t("questionBank.emptyOfferingText")}</p>
+          </div>
+        ) : questionsLoading ? (
+          <div className="pageStateCard">{t("questionBank.loadingQuestions")}</div>
+        ) : filteredQuestions.length === 0 ? (
+          <div className="emptyState">
+            <p>{t("questionBank.emptyTitle")}</p>
+            <p>{t("questionBank.emptyText")}</p>
+            <button className="btn btnPrimary" type="button" onClick={() => openAuthoringPanel()}>
+              Add first question
+            </button>
+          </div>
+        ) : (
+          <section className="stackLg">
+            <div className="tableWrap questionBankTableWrap">
+              <table className="dataTable questionBankTable">
+                <thead>
+                  <tr>
+                    <th>Question</th>
+                    <th>Type</th>
+                    <th>Topic</th>
+                    <th>Level</th>
+                    <th>Points</th>
+                    <th>Answer readiness</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleQuestions.map((question) => (
+                    <QuestionRow key={question.id} question={question} onDelete={handleDelete} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="paginationBar">
+              <span>Showing {questionStart}-{questionEnd} of {filteredQuestions.length}</span>
+              <div className="paginationActions">
+                <button className="btn" type="button" disabled={questionPage <= 1} onClick={() => setQuestionPage((current) => Math.max(1, current - 1))}>
+                  Previous
+                </button>
+                <span className="paginationCurrent">Page {questionPage} of {questionPageCount}</span>
+                <button className="btn" type="button" disabled={questionPage >= questionPageCount} onClick={() => setQuestionPage((current) => Math.min(questionPageCount, current + 1))}>
+                  Next
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+      </div>
+    </AppShell>
+  );
+}
+
+function QuestionAuthoringPanel({
+  form,
+  errors,
+  saving,
+  success,
+  selectedOffering,
+  onClose,
+  onChange,
+  onTypeChange,
+  onUpdateOption,
+  onAddOption,
+  onRemoveOption,
+  onSaveAnother,
+  onSaveClose,
+}) {
+  const errorCount = Object.keys(errors).length;
+
+  return (
+    <section className="surfaceCard questionAuthoringPanel">
+      <div className="sectionHeader">
+        <div>
+          <h3>Add question</h3>
+          <span className="sectionMeta">
+            {selectedOffering ? formatOffering(selectedOffering) : "Selected offering"} - stay in context and add multiple entries.
+          </span>
+        </div>
+        <button className="btn" type="button" onClick={onClose} disabled={saving}>
+          Close
+        </button>
+      </div>
+
+      <div className="sectionBody stackLg">
+        {errorCount > 0 ? (
+          <div className="formErrorSummary">
+            <strong>Complete the required fields before saving.</strong>
+            <span>{errorCount} item{errorCount === 1 ? "" : "s"} need attention.</span>
+          </div>
+        ) : null}
+
+        <div className="questionTypeSelector" aria-label="Question type">
+          {questionTypes.map((type) => (
+            <button
+              key={type.value}
+              type="button"
+              className={form.type === type.value ? "active" : ""}
+              onClick={() => onTypeChange(type.value)}
+              disabled={saving}
+            >
+              <strong>{type.label}</strong>
+              <span>{type.help}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="formGrid formGridTwo">
+          <div className="field fieldSpanFull">
+            <label className="label">Question prompt <RequiredMark /></label>
+            <textarea
+              className={`input textarea textareaCompact${errors.text ? " inputInvalid" : ""}`}
+              rows={4}
+              value={form.text}
+              onChange={(e) => onChange({ ...form, text: e.target.value })}
+              placeholder="Write the exact question students will see."
+              disabled={saving}
+            />
+            <FieldError message={errors.text} />
+          </div>
+
+          <div className="field">
+            <label className="label">Points <RequiredMark /></label>
+            <input
+              className={`input${errors.points ? " inputInvalid" : ""}`}
+              type="number"
+              min="1"
+              value={form.points}
+              onChange={(e) => onChange({ ...form, points: e.target.value })}
+              disabled={saving}
+            />
+            <FieldError message={errors.points} />
+          </div>
+
+          <div className="field">
+            <label className="label">Topic / module</label>
+            <input
+              className="input"
+              value={form.topic}
+              onChange={(e) => onChange({ ...form, topic: e.target.value })}
+              placeholder="Example: Normalization, arrays, joins"
+              disabled={saving}
+            />
+          </div>
+
+          <div className="field">
+            <label className="label">Difficulty</label>
+            <select
+              className="input"
+              value={form.difficulty}
+              onChange={(e) => onChange({ ...form, difficulty: e.target.value })}
+              disabled={saving}
+            >
+              <option value="Easy">Easy</option>
+              <option value="Medium">Medium</option>
+              <option value="Hard">Hard</option>
+            </select>
+          </div>
+        </div>
+
+        {form.type === "MCQ" ? (
+          <div className="authoringSubsection">
+            <div className="sectionHeader sectionHeaderInline">
+              <div>
+                <h3>Answer options</h3>
+                <span className="sectionMeta">At least two options and one correct answer are required.</span>
+              </div>
+              <button className="btn" type="button" onClick={onAddOption} disabled={saving}>
+                Add option
+              </button>
+            </div>
+            <div className="questionOptionGrid">
+              {form.options.map((option, index) => (
+                <div className="questionOptionInput" key={index}>
+                  <input
+                    className="input"
+                    value={option}
+                    onChange={(e) => onUpdateOption(index, e.target.value)}
+                    placeholder={`Option ${index + 1}`}
+                    disabled={saving}
+                  />
+                  <button className="btn btnGhost" type="button" onClick={() => onRemoveOption(index)} disabled={saving || form.options.length <= 2}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <FieldError message={errors.options} />
+
+            <div className="field">
+              <label className="label">Correct answer(s) <RequiredMark /></label>
+              <div className={`correctAnswerChecklist${errors.correctAnswer ? " inputInvalid" : ""}`}>
+                {form.options
+                  .map((option) => option.trim())
+                  .filter(Boolean)
+                  .map((option) => {
+                    const selected = form.correctAnswers.includes(option);
+                    return (
+                      <label key={option}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() =>
+                            onChange({
+                              ...form,
+                              correctAnswers: selected
+                                ? form.correctAnswers.filter((answer) => answer !== option)
+                                : [...form.correctAnswers, option],
+                            })
+                          }
+                          disabled={saving}
+                        />
+                        <span>{option}</span>
+                      </label>
+                    );
+                  })}
+              </div>
+              <span className="small">Select one or more correct options.</span>
+              <FieldError message={errors.correctAnswer} />
+            </div>
+          </div>
+        ) : null}
+
+        {form.type === "Text" ? (
+          <div className="field">
+            <label className="label">Model answer <RequiredMark /></label>
+            <textarea
+              className={`input textarea textareaCompact${errors.correctAnswer ? " inputInvalid" : ""}`}
+              rows={4}
+              value={form.correctAnswer}
+              onChange={(e) => onChange({ ...form, correctAnswer: e.target.value })}
+              placeholder="Write the reference answer AI and staff should use for evaluation."
+              disabled={saving}
+            />
+            <FieldError message={errors.correctAnswer} />
+          </div>
+        ) : null}
+
+        {form.type === "SQL" ? (
+          <div className="authoringSubsection">
+            <div className="sectionHeader sectionHeaderInline">
+              <div>
+                <h3>SQL evaluation setup</h3>
+                <span className="sectionMeta">Define the student context and private grading reference separately.</span>
+              </div>
+              <span className="statusPill statusDraft">Safe preview</span>
+            </div>
+
+            <div className="formGrid formGridTwo">
+              <div className="field">
+                <label className="label">SQL dialect</label>
+                <select
+                  className="input"
+                  value={form.sqlDialect}
+                  onChange={(e) => onChange({ ...form, sqlDialect: e.target.value })}
+                  disabled={saving}
+                >
+                  <option value="PostgreSQL">PostgreSQL</option>
+                  <option value="SQL Server">SQL Server</option>
+                  <option value="MySQL">MySQL</option>
+                  <option value="SQLite">SQLite</option>
+                  <option value="Generic SQL">Generic SQL</option>
+                </select>
+              </div>
+              <div className="field">
+                <label className="label">Dataset description</label>
+                <input
+                  className="input"
+                  value={form.datasetDescription}
+                  onChange={(e) => onChange({ ...form, datasetDescription: e.target.value })}
+                  placeholder="Example: Enrollment data for the current semester"
+                  disabled={saving}
+                />
+              </div>
+            </div>
+
+            <div className="field">
+              <label className="label">Schema / table context <RequiredMark /></label>
+              <textarea
+                className={`input textarea textareaCompact${errors.sqlSchema ? " inputInvalid" : ""}`}
+                rows={4}
+                value={form.sqlSchema}
+                onChange={(e) => onChange({ ...form, sqlSchema: e.target.value })}
+                placeholder="Example: Students(Id, FullName), Exams(Id, Title), Attempts(StudentId, ExamId, Score)"
+                disabled={saving}
+              />
+              <FieldError message={errors.sqlSchema} />
+            </div>
+
+            <div className="field">
+              <label className="label">Starter SQL <RequiredMark /></label>
+              <textarea
+                className={`input textarea technicalAuthoringTextarea${errors.starterCode ? " inputInvalid" : ""}`}
+                rows={7}
+                value={form.starterCode}
+                onChange={(e) => onChange({ ...form, starterCode: e.target.value })}
+                disabled={saving}
+              />
+              <FieldError message={errors.starterCode} />
+            </div>
+
+            <div className="formGrid formGridTwo">
+              <div className="field">
+                <label className="label">Expected result / output <RequiredMark /></label>
+                <textarea
+                  className={`input textarea textareaCompact${errors.expectedOutput ? " inputInvalid" : ""}`}
+                  rows={5}
+                  value={form.expectedOutput}
+                  onChange={(e) => onChange({ ...form, expectedOutput: e.target.value })}
+                  placeholder="Describe columns, rows, ordering, aggregates, or expected result shape."
+                  disabled={saving}
+                />
+                <FieldError message={errors.expectedOutput} />
+              </div>
+              <div className="field">
+                <label className="label">Model SQL answer <RequiredMark /></label>
+                <textarea
+                  className={`input textarea textareaCompact${errors.modelAnswer ? " inputInvalid" : ""}`}
+                  rows={5}
+                  value={form.modelAnswer}
+                  onChange={(e) => onChange({ ...form, modelAnswer: e.target.value })}
+                  placeholder="Write the reference SQL query used for review."
+                  disabled={saving}
+                />
+                <FieldError message={errors.modelAnswer} />
+              </div>
+            </div>
+
+            <div className="formGrid formGridTwo">
+              <div className="field">
+                <label className="label">Public test cases</label>
+                <textarea
+                  className="input textarea textareaCompact"
+                  rows={4}
+                  value={form.publicTestCasesText}
+                  onChange={(e) => onChange({ ...form, publicTestCasesText: e.target.value })}
+                  placeholder="One public check per line, visible as validation guidance."
+                  disabled={saving}
+                />
+              </div>
+              <div className="field">
+                <label className="label">Hidden grading checks</label>
+                <textarea
+                  className="input textarea textareaCompact"
+                  rows={4}
+                  value={form.hiddenTestCasesText}
+                  onChange={(e) => onChange({ ...form, hiddenTestCasesText: e.target.value })}
+                  placeholder="Private checks for staff/future sandbox grading."
+                  disabled={saving}
+                />
+              </div>
+            </div>
+
+            <div className="field">
+              <label className="label">Grading notes</label>
+              <textarea
+                className="input textarea textareaCompact"
+                rows={3}
+                value={form.gradingNotes}
+                onChange={(e) => onChange({ ...form, gradingNotes: e.target.value })}
+                placeholder="Explain partial credit, accepted alternatives, and common mistakes."
+                disabled={saving}
+              />
+            </div>
+          </div>
+        ) : null}
+
+        {form.type === "CSharp" ? (
+          <div className="authoringSubsection">
+            <div className="sectionHeader sectionHeaderInline">
+              <div>
+                <h3>C# evaluation setup</h3>
+                <span className="sectionMeta">Define the coding contract, expected output, and private grading reference.</span>
+              </div>
+              <span className="statusPill statusDraft">Safe preview</span>
+            </div>
+
+            <div className="formGrid formGridTwo">
+              <div className="field">
+                <label className="label">Required method signature</label>
+                <input
+                  className="input"
+                  value={form.requiredMethodSignature}
+                  onChange={(e) => onChange({ ...form, requiredMethodSignature: e.target.value })}
+                  placeholder="Example: public static int SumEvenNumbers(int[] values)"
+                  disabled={saving}
+                />
+              </div>
+              <div className="field">
+                <label className="label">Allowed libraries</label>
+                <input
+                  className="input"
+                  value={form.allowedLibraries}
+                  onChange={(e) => onChange({ ...form, allowedLibraries: e.target.value })}
+                  placeholder="Example: System, System.Linq"
+                  disabled={saving}
+                />
+              </div>
+            </div>
+
+            <div className="field">
+              <label className="label">Expected behavior</label>
+              <textarea
+                className="input textarea textareaCompact"
+                rows={3}
+                value={form.expectedBehavior}
+                onChange={(e) => onChange({ ...form, expectedBehavior: e.target.value })}
+                placeholder="Describe what the method/program must do in academic terms."
+                disabled={saving}
+              />
+            </div>
+
+            <div className="field">
+              <label className="label">Starter C# code <RequiredMark /></label>
+              <textarea
+                className={`input textarea technicalAuthoringTextarea${errors.starterCode ? " inputInvalid" : ""}`}
+                rows={7}
+                value={form.starterCode}
+                onChange={(e) => onChange({ ...form, starterCode: e.target.value })}
+                disabled={saving}
+              />
+              <FieldError message={errors.starterCode} />
+            </div>
+
+            <div className="formGrid formGridTwo">
+              <div className="field">
+                <label className="label">Expected output <RequiredMark /></label>
+                <textarea
+                  className={`input textarea textareaCompact${errors.expectedOutput ? " inputInvalid" : ""}`}
+                  rows={5}
+                  value={form.expectedOutput}
+                  onChange={(e) => onChange({ ...form, expectedOutput: e.target.value })}
+                  placeholder="Describe the output or return value expected from a correct solution."
+                  disabled={saving}
+                />
+                <FieldError message={errors.expectedOutput} />
+              </div>
+              <div className="field">
+                <label className="label">Model C# answer <RequiredMark /></label>
+                <textarea
+                  className={`input textarea textareaCompact${errors.modelAnswer ? " inputInvalid" : ""}`}
+                  rows={5}
+                  value={form.modelAnswer}
+                  onChange={(e) => onChange({ ...form, modelAnswer: e.target.value })}
+                  placeholder="Write the reference C# solution or essential implementation outline."
+                  disabled={saving}
+                />
+                <FieldError message={errors.modelAnswer} />
+              </div>
+            </div>
+
+            <div className="formGrid formGridTwo">
+              <div className="field">
+                <label className="label">Public test cases</label>
+                <textarea
+                  className="input textarea textareaCompact"
+                  rows={4}
+                  value={form.publicTestCasesText}
+                  onChange={(e) => onChange({ ...form, publicTestCasesText: e.target.value })}
+                  placeholder="One visible check per line, e.g. Input: [1,2,3] -> Output: 6"
+                  disabled={saving}
+                />
+              </div>
+              <div className="field">
+                <label className="label">Hidden grading checks</label>
+                <textarea
+                  className="input textarea textareaCompact"
+                  rows={4}
+                  value={form.hiddenTestCasesText}
+                  onChange={(e) => onChange({ ...form, hiddenTestCasesText: e.target.value })}
+                  placeholder="Private cases for professor/future sandbox grading."
+                  disabled={saving}
+                />
+              </div>
+            </div>
+
+            <div className="formGrid formGridTwo">
+              <div className="field">
+                <label className="label">Timeout note</label>
+                <input
+                  className="input"
+                  value={form.timeoutNote}
+                  onChange={(e) => onChange({ ...form, timeoutNote: e.target.value })}
+                  placeholder="Example: Must complete under 2 seconds"
+                  disabled={saving}
+                />
+              </div>
+              <div className="field">
+                <label className="label">Memory note</label>
+                <input
+                  className="input"
+                  value={form.memoryNote}
+                  onChange={(e) => onChange({ ...form, memoryNote: e.target.value })}
+                  placeholder="Example: Avoid storing duplicate collections"
+                  disabled={saving}
+                />
+              </div>
+            </div>
+
+            <div className="field">
+              <label className="label">Grading notes</label>
+              <textarea
+                className="input textarea textareaCompact"
+                rows={3}
+                value={form.gradingNotes}
+                onChange={(e) => onChange({ ...form, gradingNotes: e.target.value })}
+                placeholder="Explain partial credit, accepted alternatives, and common mistakes."
+                disabled={saving}
+              />
+            </div>
+          </div>
+        ) : null}
+
+        <div className="formActionsBar questionAuthoringActions">
+          <button className="btn btnPrimary" type="button" onClick={onSaveAnother} disabled={saving}>
+            {saving ? "Saving..." : "Save and add another"}
+          </button>
+          <button className="btn" type="button" onClick={onSaveClose} disabled={saving}>
+            Save and close
+          </button>
+          <span className="small">Saved questions stay attached to the selected offering.</span>
+        </div>
+        {success ? <div className="successBanner">{success}</div> : null}
+      </div>
+    </section>
+  );
+}
+
+function QuestionRow({ question, onDelete }) {
+  const [expanded, setExpanded] = useState(false);
+  const prompt = extractPrompt(question);
+  const readiness = getAnswerReadiness(question);
+
+  return (
+    <>
+      <tr>
+        <td>
+          <button className="tableDisclosure" type="button" onClick={() => setExpanded((current) => !current)}>
+            <strong>{truncate(prompt, 120)}</strong>
+            <span>{expanded ? "Hide details" : "View details"}</span>
+          </button>
+        </td>
+        <td>
+          <span className="statusPill statusDraft">{formatQuestionType(question.type)}</span>
+        </td>
+        <td>{question.topic || "-"}</td>
+        <td>{question.difficulty || "-"}</td>
+        <td>{question.points ?? 0}</td>
+        <td>
+          <span className={`statusPill ${readiness.ready ? "statusLive" : "statusWarn"}`}>
+            {readiness.label}
+          </span>
+        </td>
+        <td>
+          <div className="resourceActionGroup">
+            <Link className="btn" to={`/question-bank/questions/${question.id}/edit`}>
+              Edit
+            </Link>
+            <button className="btn btnDanger" type="button" onClick={() => onDelete(question.id)}>
+              Delete
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded ? (
+        <tr className="questionDetailRow">
+          <td colSpan={7}>
+            <QuestionDetails question={question} />
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+function QuestionDetails({ question }) {
+  const parsed = parseTechnicalQuestion(question.text, question.type, question.technicalMetadata);
+  const correctAnswers = parseCorrectAnswers(question.correctAnswer);
+
+  return (
+    <div className="questionDetailPanel">
+      <div>
+        <span className="summaryLabel">Prompt</span>
+        <p>{parsed.prompt || question.text || "-"}</p>
+      </div>
+
+      {question.type === "MCQ" && Array.isArray(question.options) ? (
+        <div>
+          <span className="summaryLabel">Options</span>
+          <div className="questionOptionPreview">
+            {question.options.map((option) => (
+              <span key={option} className={correctAnswers.includes(option) ? "correct" : ""}>
+                {option}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {parsed.schema ? (
+        <div>
+          <span className="summaryLabel">Schema</span>
+          <pre className="technicalCodeBlock">{parsed.schema}</pre>
+        </div>
+      ) : null}
+
+      {parsed.code ? (
+        <div>
+          <span className="summaryLabel">{question.type === "SQL" ? "Starter SQL" : "Starter C# code"}</span>
+          <pre className="technicalCodeBlock">{parsed.code}</pre>
+        </div>
+      ) : null}
+
+      {question.type === "SQL" && (parsed.sqlDialect || parsed.datasetDescription) ? (
+        <div>
+          <span className="summaryLabel">SQL metadata</span>
+          <p>{[parsed.sqlDialect && `Dialect: ${parsed.sqlDialect}`, parsed.datasetDescription && `Dataset: ${parsed.datasetDescription}`].filter(Boolean).join(" / ")}</p>
+        </div>
+      ) : null}
+
+      {question.type === "SQL" && parsed.expectedOutput ? (
+        <div>
+          <span className="summaryLabel">Expected result / output</span>
+          <pre className="technicalCodeBlock">{parsed.expectedOutput}</pre>
+        </div>
+      ) : null}
+
+      {question.type === "CSharp" && (parsed.requiredMethodSignature || parsed.expectedBehavior || parsed.allowedLibraries) ? (
+        <div>
+          <span className="summaryLabel">C# metadata</span>
+          {parsed.requiredMethodSignature ? <p>Signature: {parsed.requiredMethodSignature}</p> : null}
+          {parsed.expectedBehavior ? <p>Behavior: {parsed.expectedBehavior}</p> : null}
+          {parsed.allowedLibraries ? <p>Allowed libraries: {parsed.allowedLibraries}</p> : null}
+        </div>
+      ) : null}
+
+      {question.type === "CSharp" && parsed.expectedOutput ? (
+        <div>
+          <span className="summaryLabel">Expected output</span>
+          <pre className="technicalCodeBlock">{parsed.expectedOutput}</pre>
+        </div>
+      ) : null}
+
+      {question.correctAnswer ? (
+        <div>
+          <span className="summaryLabel">{question.type === "SQL" ? "Model SQL answer" : question.type === "MCQ" ? "Correct answer(s)" : "Model / expected answer"}</span>
+          <p>{question.type === "MCQ" ? correctAnswers.join(", ") : question.correctAnswer}</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RequiredMark() {
+  return <span className="requiredMark">*</span>;
+}
+
+function FieldError({ message }) {
+  if (!message) return null;
+  return <span className="fieldError">{message}</span>;
+}
+
+function validateQuestionForm(form) {
+  const errors = {};
+  const options = form.options.map((option) => option.trim()).filter(Boolean);
+
+  if (!form.text.trim()) errors.text = "Question prompt is required.";
+  if (!Number(form.points) || Number(form.points) <= 0) errors.points = "Points must be greater than zero.";
+
+  if (form.type === "MCQ") {
+    if (options.length < 2) errors.options = "Add at least two answer options.";
+    if (form.correctAnswers.length === 0) {
+      errors.correctAnswer = "Select at least one correct answer.";
+    } else if (form.correctAnswers.some((answer) => !options.includes(answer))) {
+      errors.correctAnswer = "Every correct answer must match one of the options.";
+    }
+  }
+
+  if (form.type === "Text" && !form.correctAnswer.trim()) {
+    errors.correctAnswer = "A model answer is required for text evaluation.";
+  }
+
+  if (isTechnicalType(form.type) && !form.expectedAnswer.trim()) {
+    errors.expectedAnswer = "Expected answer or grading criteria are required.";
+  }
+
+  if (form.type === "SQL") {
+    if (!form.sqlSchema.trim()) errors.sqlSchema = "Schema or table context is required for SQL questions.";
+    if (!form.starterCode.trim()) errors.starterCode = "Starter SQL is required.";
+    if (!form.expectedOutput.trim()) errors.expectedOutput = "Expected SQL result or output is required.";
+    if (!form.modelAnswer.trim()) errors.modelAnswer = "Model SQL answer is required.";
+    delete errors.expectedAnswer;
+  }
+
+  if (form.type === "CSharp") {
+    if (!form.starterCode.trim()) errors.starterCode = "Starter C# code is required.";
+    if (!form.expectedOutput.trim()) errors.expectedOutput = "Expected C# output is required.";
+    if (!form.modelAnswer.trim()) errors.modelAnswer = "Model C# answer is required.";
+    delete errors.expectedAnswer;
+  }
+
+  return errors;
+}
+
+function formatOffering(offering) {
+  const code = offering.course?.code || "";
+  const name = offering.course?.name || "";
+  const term = offering.term?.code || offering.term?.name || "";
+  const section = offering.sectionCode || "-";
+  return [code && name ? `${code} - ${name}` : code || name, term, `Section ${section}`].filter(Boolean).join(" | ");
+}
+
+function buildQuestionText(form) {
+  if (!isTechnicalType(form.type)) {
+    return form.text.trim();
+  }
+
+  const sections = [`Prompt:\n${form.text.trim()}`];
+
+  if (form.type === "SQL" && form.sqlSchema.trim()) {
+    sections.push(`Schema:\n${form.sqlSchema.trim()}`);
+  }
+
+  if (form.starterCode.trim()) {
+    sections.push(`${form.type === "SQL" ? "Starter SQL" : "Starter C# code"}:\n${form.starterCode.trim()}`);
+  }
+
+  return sections.join("\n\n---\n\n");
+}
+
+function buildTechnicalMetadata(form) {
+  if (!isTechnicalType(form.type)) return null;
+
+  if (form.type === "SQL") {
+    return {
+      schema: form.sqlSchema.trim(),
+      starterCode: form.starterCode.trim(),
+      expectedOutput: form.expectedOutput.trim(),
+      modelAnswer: form.modelAnswer.trim(),
+      gradingNotes: form.gradingNotes.trim(),
+      sqlDialect: form.sqlDialect,
+      datasetDescription: form.datasetDescription.trim(),
+      publicTestCases: buildTextTestCases(form.publicTestCasesText, "Public"),
+      hiddenTestCases: buildTextTestCases(form.hiddenTestCasesText, "Hidden"),
+    };
+  }
+
+  return {
+    starterCode: form.starterCode.trim(),
+    expectedOutput: form.expectedOutput.trim(),
+    modelAnswer: form.modelAnswer.trim(),
+    gradingNotes: form.gradingNotes.trim(),
+    requiredMethodSignature: form.requiredMethodSignature.trim(),
+    expectedBehavior: form.expectedBehavior.trim(),
+    allowedLibraries: form.allowedLibraries.trim(),
+    timeoutNote: form.timeoutNote.trim(),
+    memoryNote: form.memoryNote.trim(),
+    publicTestCases: buildTextTestCases(form.publicTestCasesText, "Public"),
+    hiddenTestCases: buildTextTestCases(form.hiddenTestCasesText, "Hidden"),
+  };
+}
+
+function buildTextTestCases(value, visibility) {
+  return String(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => ({
+      id: `${visibility.toLowerCase()}-${index + 1}`,
+      title: `${visibility} check ${index + 1}`,
+      visibility,
+      expectedOutput: line,
+      gradingNote: line,
+    }));
+}
+
+function isTechnicalType(type) {
+  return type === "CSharp" || type === "SQL";
+}
+
+function isTechnicalQuestion(question) {
+  return isTechnicalType(question.type);
+}
+
+function formatQuestionType(type) {
+  if (type === "CSharp") return "C#";
+  return type || "-";
+}
+
+function extractPrompt(question) {
+  if (!isTechnicalQuestion(question)) return question.text || "";
+  return parseTechnicalQuestion(question.text, question.type).prompt || question.text || "";
+}
+
+function getAnswerReadiness(question) {
+  if (question.type === "MCQ") {
+    const options = Array.isArray(question.options) ? question.options.filter(Boolean) : [];
+    const correctAnswers = parseCorrectAnswers(question.correctAnswer);
+    return {
+      ready: options.length >= 2 && correctAnswers.length > 0,
+      label: options.length >= 2 && correctAnswers.length > 0 ? `${correctAnswers.length} correct` : "Needs answer",
+    };
+  }
+
+  return {
+    ready: Boolean(question.correctAnswer),
+    label: question.correctAnswer ? "Model answer" : "Needs model",
+  };
+}
+
+function parseTechnicalQuestion(text, type, metadata = null) {
+  const result = {
+    prompt: "",
+    schema: metadata?.schema || "",
+    code: metadata?.starterCode || "",
+    expectedOutput: metadata?.expectedOutput || "",
+    modelAnswer: metadata?.modelAnswer || "",
+    gradingNotes: metadata?.gradingNotes || "",
+    requiredMethodSignature: metadata?.requiredMethodSignature || "",
+    expectedBehavior: metadata?.expectedBehavior || "",
+    allowedLibraries: metadata?.allowedLibraries || "",
+    timeoutNote: metadata?.timeoutNote || "",
+    memoryNote: metadata?.memoryNote || "",
+    sqlDialect: metadata?.sqlDialect || "",
+    datasetDescription: metadata?.datasetDescription || "",
+    publicTestCases: Array.isArray(metadata?.publicTestCases) ? metadata.publicTestCases : [],
+  };
+
+  if (type !== "CSharp" && type !== "SQL") {
+    result.prompt = text || "";
+    return result;
+  }
+
+  const sections = String(text || "").split("\n\n---\n\n");
+  for (const section of sections) {
+    if (section.startsWith("Prompt:\n")) {
+      result.prompt = section.replace("Prompt:\n", "").trim();
+    } else if (!result.schema && section.startsWith("Schema:\n")) {
+      result.schema = section.replace("Schema:\n", "").trim();
+    } else if (!result.code && section.startsWith("Starter SQL:\n")) {
+      result.code = section.replace("Starter SQL:\n", "").trim();
+    } else if (!result.code && section.startsWith("Starter C# code:\n")) {
+      result.code = section.replace("Starter C# code:\n", "").trim();
+    } else if (!result.expectedOutput && section.startsWith("Expected output:\n")) {
+      result.expectedOutput = section.replace("Expected output:\n", "").trim();
+    }
+  }
+
+  if (!result.prompt) {
+    result.prompt = text || "";
+  }
+
+  return result;
+}
+
+function truncate(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}...`;
+}
+
+function parseCorrectAnswers(correctAnswer) {
+  const value = String(correctAnswer || "").trim();
+  if (!value) return [];
+
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+    }
+  } catch {
+    // Older questions store a single answer as plain text.
+  }
+
+  return [value];
+}
+
+function serializeCorrectAnswers(correctAnswers) {
+  const normalized = Array.from(new Set((correctAnswers || []).map((answer) => String(answer || "").trim()).filter(Boolean)));
+  if (normalized.length <= 1) return normalized[0] || "";
+  return JSON.stringify(normalized);
+}
+
+function readApiMessage(err) {
+  return err?.response?.data?.message ||
+    (typeof err?.response?.data === "string" ? err.response.data : null) ||
+    err?.message;
+}
